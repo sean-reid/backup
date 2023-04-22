@@ -1,0 +1,199 @@
+#!/bin/bash
+# 
+# backup: easily copy data between hard drives that have connection issues
+#
+# This script lets you copy files and directories, using rsync, between one
+# or even two hard drives, and will restart if the drives are unplugged and
+# replugged for some reason.
+#
+# Tested only on MacOS Ventura.
+#
+# Example usage: ./backup -s /dev/disk2s1 -d ~/backup_data/ -t 20 -r 20
+# 
+# ./backup --help for more options.
+
+set -eou pipefail
+
+VERSION="v0.1.1"
+
+USAGE="
+Usage: $(basename $0) [OPTIONS]
+
+Options:
+  -s, --source                 The source device, file or directory. Required.
+  -d, --destination            The destination device, file or directory. Required.
+  -t, --timeout                Maximum time, in minutes, that the script should run for. Default is 15.
+  -r, --retries                Maximum number of times to retry the script before exiting. Default is 15.
+  -v, --version                Show the version of this script.
+  -h, --help                   Show this usage menu.
+"
+
+if [ $# -eq 0 ]
+  then
+    echo "$USAGE"
+    exit 101
+fi
+
+SOURCE=""
+DESTINATION=""
+TIMEOUT=15
+RETRIES=15
+
+while [ $# -gt 0 ]
+do
+    case "$1" in
+        -h | --help )
+            echo "$USAGE"
+            exit 0
+            ;;
+        -v | --version ) 
+            echo "$VERSION"
+            exit 0
+            ;;
+        -s | --source )
+            SOURCE=$2
+            shift
+            ;;
+        -d | --destination )
+            DESTINATION=$2
+            shift
+            ;;
+        -t | --timeout  )
+            TIMEOUT=$2
+            shift
+            ;;
+        -r | --retries  )
+            RETRIES=$2
+            shift
+            ;;
+        * )
+            echo "$USAGE"
+            exit 102
+            ;;
+    esac
+    shift
+done
+
+if [ -z "${SOURCE}" ]
+  then
+    echo "$USAGE"
+    exit 103
+fi
+
+if [ -z "${DESTINATION}" ]
+  then
+    echo "$USAGE"
+    exit 104
+fi
+
+if [ -z "${TIMEOUT}" ]
+  then
+    echo "$USAGE"
+    exit 105
+fi
+
+if [ -z "${RETRIES}" ]
+  then
+    echo "$USAGE"
+    exit 106
+fi
+
+SOURCE_DEV=0
+DEST_DEV=0
+SOURCE_DIR=$SOURCE
+DEST_DIR=$DESTINATION
+
+if [[ -b $SOURCE ]]; then
+    echo "Mounting $SOURCE to /tmp/source_mount..."
+    SOURCE_DIR=/tmp/source_mount
+    mkdir -p $SOURCE_DIR
+    diskutil mount -mountPoint /tmp/source_mount $SOURCE
+    SOURCE_DEV=1
+fi
+
+if [[ -b $DESTINATION ]]; then
+    echo "Mounting $DESTINATION to /tmp/dest_mount..."
+    DEST_DIR=/tmp/dest_mount
+    mkdir -p $DEST_DIR
+    diskutil mount -mountPoint /tmp/dest_mount $DESTINATION
+    DEST_DEV=1
+fi
+
+copy_files() {
+
+    retry_count=0
+    start=$(gdate +%s%N)
+    runtime=0
+    
+    while [[ $retry_count -lt $RETRIES && $runtime -lt $TIMEOUT ]]; do
+        if [[ $retry_count -ge $RETRIES ]]; then
+            echo "Too many retries, exiting."
+            exit 107
+        fi
+        now=$(gdate +%s%N)
+        runtime=$((($now-$start)/1000000000/60))
+        if [[ $runtime -ge $TIMEOUT ]]; then
+            echo "Timeout, exiting."
+            exit 108
+        fi
+        if [[ $SOURCE_DEV == 1 ]]; then
+            if [[ ! -b $SOURCE ]]; then
+                while [ ! -b "$SOURCE" ]; do
+                    sleep 1
+                    echo "Remounting $SOURCE to $SOURCE_DIR..."
+                    diskutil mount -mountPoint $SOURCE_DIR $SOURCE || :
+                done
+            fi
+        fi
+        if [[ $DEST_DEV == 1 ]]; then
+            if [[ ! -b $DESTINATION ]]; then
+                while [ ! -b "$DESTINATION" ]; do
+                    sleep 1
+                    echo "Remounting $DESTINATION to $DEST_DIR..."
+                    diskutil mount -mountPoint $DEST_DIR $DESTINATION || :
+                done
+            fi
+        fi
+        echo "Copy interrupted. Restarting copy."
+        echo "Resuming copying files from $SOURCE_DIR to $DEST_DIR..."
+        rsync \
+            --ignore-existing \
+            --recursive \
+            --links \
+            --perms \
+            --times \
+            --group \
+            --owner \
+            --devices \
+            --specials \
+            --human-readable \
+            --verbose \
+            --partial-dir=.rsync-partial \
+            $SOURCE_DIR \
+            $DEST_DIR
+        ((retry_count+=1))
+    done
+}
+
+echo "Copying files from $SOURCE_DIR to $DEST_DIR..."
+
+rsync \
+  --ignore-existing \
+  --recursive \
+  --links \
+  --perms \
+  --times \
+  --group \
+  --owner \
+  --devices \
+  --specials \
+  --human-readable \
+  --verbose \
+  --partial-dir=.rsync-partial \
+  $SOURCE_DIR \
+  $DEST_DIR || \
+copy_files
+
+echo "Finished."
+
+exit 0
